@@ -1,2 +1,2 @@
-from .battleship import *
+from .strategy import *
 from .board import *

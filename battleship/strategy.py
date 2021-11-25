@@ -7,7 +7,8 @@ from queue import Queue
 from timeit import default_timer as timer
 from typing import Callable, Dict, Generator, Iterable, Set, Tuple, List, Type, Union
 
-from board import (
+from .board import (
+    Board,
     Ship,
     Orientation,
     Point,
@@ -23,6 +24,98 @@ from board import (
 
 
 DEBUG = False
+
+# -----------------------------------------------------------------------------
+
+
+def _points_until_blocked(board: Board, points: Iterable[Point]) -> int:
+    available = 0
+    for (r, c) in points:
+        if not board[r][c]:
+            available += 1
+        else:
+            break
+    return available
+
+
+def _possible_placements(board: Board, point: Point, ship_length: int) -> int:
+    """The number of ways a ship of given length may be placed over a point.
+
+    The number of possible placements is equal to the sum of the number of possible
+    vertical and horizontal placements.
+    """
+    assert 0 <= point[0] < board.rows, "Row value out-of-bounds"
+    assert 0 <= point[1] < board.cols, "Col value out-of-bounds"
+
+    row, col = point
+
+    # Vertical
+    ## Up
+    points = [
+        (r, col) for r in range(row - 1, row - ship_length, -1) if 0 <= r < board.rows
+    ]
+    available_up = _points_until_blocked(board, points)
+
+    ## Down
+    points = [
+        (r, col) for r in range(row + 1, row + ship_length) if 0 <= r < board.rows
+    ]
+    available_down = _points_until_blocked(board, points)
+
+    ## Vertical total
+    available_vertical = available_up + available_down
+    placements_vertical = max(available_vertical - ship_length + 2, 0)
+
+    # Horizontal
+    ## Left
+    points = [
+        (row, c) for c in range(col - 1, col - ship_length, -1) if 0 <= c < board.cols
+    ]
+    available_left = _points_until_blocked(board, points)
+
+    ## Right
+    points = [
+        (row, c) for c in range(col + 1, col + ship_length) if 0 <= c < board.cols
+    ]
+    available_right = _points_until_blocked(board, points)
+
+    ## Horizontal total
+    available_horizontal = available_left + available_right
+    placements_horizontal = max(available_horizontal - ship_length + 2, 0)
+
+    return placements_vertical + placements_horizontal
+
+
+def _subtract_possible_placements(
+    game_board: Board, placements_board: Board, point: Point, ship_length: int
+):
+    """TODO: Give a description"""
+    assert game_board.rows == placements_board.rows, "Unequal row length"
+    assert game_board.cols == placements_board.cols, "Unequal column length"
+    assert 0 <= point[0] < game_board.rows, "Row value out-of-bounds"
+    assert 0 <= point[1] < game_board.cols, "Col value out-of-bounds"
+
+    row, col = point
+
+    # Indicate that the given point now has no "possibilities".
+    placements_board[row][col] = 0
+
+
+
+
+def _initial_ship_odds(dimensions: Tuple[int, int], ships: Tuple[int, ...]) -> Board:
+    rows, cols = dimensions
+
+    board = Board(rows, cols)
+
+    for row in range(rows):
+        for col in range(cols):
+            for ship in ships:
+                point = (row, col)
+                board[row][col] += _possible_placements(board, point, ship)
+
+    return board
+
 
 # -----------------------------------------------------------------------------
 

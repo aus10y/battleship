@@ -4,13 +4,13 @@ import random
 from collections import namedtuple
 from enum import Enum
 from string import ascii_lowercase
-from typing import Callable, Dict, Generator, Iterable, Set, Tuple, List, Type, Union
+from typing import Callable, Dict, Generator, Iterable, Iterator, Set, Tuple, List, Type, Union
 
 
 """
 Convenient Type Aliases
 """
-Board = List[List[str]]
+SimpleBoard = List[List[str]]
 Point = Tuple[int, int]
 
 
@@ -51,6 +51,27 @@ class Orientation(Enum):
     Right = 3
 
 
+class Board:
+    def __init__(self, rows: int, cols: int, initial_point=0):
+        self.rows = rows
+        self.cols = cols
+        self._board = tuple([initial_point for _ in range(cols)] for _ in range(rows))
+
+    def __getitem__(self, row):
+        return self._board[row]
+
+    def __repr__(self):
+        return "\n".join("".join(f"{col:>3}" for col in row) for row in self._board)
+
+    def _points(self) -> Iterator:
+        for row in range(self.rows):
+            for col in range(self.cols):
+                yield (row, col)
+
+    def points(self) -> Iterator:
+        return self._points()
+
+
 class Ship:
     def __init__(self, ship_id: str, points: Iterable[Point]):
         self.id = ship_id
@@ -78,13 +99,13 @@ class Ship:
         return self._points == self._hits
 
 
-def get_board_dimensions(board: Board):
+def get_board_dimensions(board: SimpleBoard):
     row = len(board)
     col = len(board[0]) if row else 0
     return (row, col)
 
 
-def initialize_board(dimensions: Tuple[int, int]) -> Board:
+def initialize_board(dimensions: Tuple[int, int]) -> SimpleBoard:
     """
     Return an empty board.
 
@@ -94,28 +115,28 @@ def initialize_board(dimensions: Tuple[int, int]) -> Board:
     return [["-" for _ in range(col)] for _ in range(row)]
 
 
-def format_board(board: Board):
+def format_board(board: SimpleBoard):
     return "\n".join("".join(row) for row in board)
 
 
-def format_board_flat(board: Board):
+def format_board_flat(board: SimpleBoard):
     return ",".join("".join(row) for row in board)
 
 
-def set_board(board: Board, ships: Tuple[Ship, ...]):
+def set_board(board: SimpleBoard, ships: Tuple[Ship, ...]):
     for ship in ships:
         ship_size = ship.length
         for row, col in ship._points:
             board[row][col] = ship.id
 
 
-def fill_board(board: Board, points: Set[Point]):
+def fill_board(board: SimpleBoard, points: Set[Point]):
     for point in points:
         row, col = point
         board[row][col] = "O"
 
 
-def write_games(file_name: str, ships: Tuple[int, ...], boards: Iterable[Board]):
+def write_games(file_name: str, ships: Tuple[int, ...], boards: Iterable[SimpleBoard]):
     with open(file_name, "w") as f:
         f.write(",".join(str(ship) for ship in ships))
         f.write("\n")
@@ -124,7 +145,7 @@ def write_games(file_name: str, ships: Tuple[int, ...], boards: Iterable[Board])
             f.write("\n")
 
 
-def read_games(file_name: str) -> Tuple[Tuple[int], List[Board]]:
+def read_games(file_name: str) -> Tuple[Tuple[int], List[SimpleBoard]]:
     # TODO
     ...
 
