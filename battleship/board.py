@@ -1,11 +1,9 @@
-import itertools
 import random
-
-from collections import namedtuple
 from enum import Enum
-from string import ascii_lowercase
-from typing import Callable, Dict, Generator, Iterable, Iterator, Set, Tuple, List, Type, Union
+from typing import Iterable, Iterator, List, Set, Tuple
 
+from battleship.game import GameConfig
+from battleship.tools import enumerate_all_points
 
 """
 Convenient Type Aliases
@@ -18,37 +16,39 @@ Point = Tuple[int, int]
 Location (0, 0) will be defined as the top left corner of the board.
 """
 BOARD_DIMENSIONS = (10, 10)  # (row, col)
-# BOARD_DIMENSIONS = (20, 20)  # (row, col)
 
 
 """
 Ships are treated as one-dimensional, having only a length.
 """
 SHIPS = (2, 3, 3, 4, 5)
-# SHIPS = (2, 3, 3, 4, 5, 5, 5, 7, 10, 12)
 
 
-"""
-Battleships can have four possible rotations.
+class Ship:
+    def __init__(self, ship_id: str, points: Iterable[Point]):
+        self.id = ship_id
+        self.points = set(points)
+        self._hits = set()
+        self.length = len(self.points)
 
-Orientation.Up is defined as the ship body moving "up" from the chosen point
-(the "X" below):
+    def __str__(self):
+        return str(sorted(self.points))
 
-  | |
-  | |
-  | |
-  | |
-  |X|
+    def __repr__(self):
+        points = ", ".join(str(p) for p in sorted(self.points))
+        return f"<Ship({self.id}, {points})>"
 
-The remaining Orientations are defined similarly.
-"""
+    def is_valid(self) -> bool:
+        return True
 
+    def is_hit(self, point: Point) -> bool:
+        if point in self.points:
+            self._hits.add(point)
+            return True
+        return False
 
-class Orientation(Enum):
-    Up = 0
-    Down = 1
-    Left = 2
-    Right = 3
+    def is_sunk(self) -> bool:
+        return self.points == self._hits
 
 
 class Board:
@@ -70,33 +70,6 @@ class Board:
 
     def points(self) -> Iterator:
         return self._points()
-
-
-class Ship:
-    def __init__(self, ship_id: str, points: Iterable[Point]):
-        self.id = ship_id
-        self._points = set(points)
-        self._hits = set()
-        self.length = len(self._points)
-
-    def __str__(self):
-        return str(sorted(self._points))
-
-    def __repr__(self):
-        points = ", ".join(str(p) for p in sorted(self._points))
-        return f"<Ship({self.id}, {points})>"
-
-    def is_valid(self) -> bool:
-        return True
-
-    def is_hit(self, point: Point) -> bool:
-        if point in self._points:
-            self._hits.add(point)
-            return True
-        return False
-
-    def is_sunk(self) -> bool:
-        return self._points == self._hits
 
 
 def get_board_dimensions(board: SimpleBoard):
@@ -125,8 +98,7 @@ def format_board_flat(board: SimpleBoard):
 
 def set_board(board: SimpleBoard, ships: Tuple[Ship, ...]):
     for ship in ships:
-        ship_size = ship.length
-        for row, col in ship._points:
+        for row, col in ship.points:
             board[row][col] = ship.id
 
 
@@ -148,6 +120,29 @@ def write_games(file_name: str, ships: Tuple[int, ...], boards: Iterable[SimpleB
 def read_games(file_name: str) -> Tuple[Tuple[int], List[SimpleBoard]]:
     # TODO
     ...
+
+
+"""
+Battleships can have four possible rotations.
+
+Orientation.Up is defined as the ship body moving "up" from the chosen point
+(the "X" below):
+
+  | |
+  | |
+  | |
+  | |
+  |X|
+
+The remaining Orientations are defined similarly.
+"""
+
+
+class Orientation(Enum):
+    Up = 0
+    Down = 1
+    Left = 2
+    Right = 3
 
 
 # -----------------------------------------------------------------------------
@@ -223,54 +218,14 @@ def _available_orientations(rows: int, cols: int, ship: int) -> List[Orientation
     return orientations
 
 
-def select_ship_placement(
-    rows: int,
-    cols: int,
-    ship: int,
-    points_available: Set[Point],
-    points_unavailable: Set[Point],
-) -> Set[Point]:
-    """
-    Choose a set of valid points for a given ship.
-    """
-    points_remaining = set(points_available)
-
-    # Pick a random orientation.
-    orientation = random.choice(_available_orientations(rows, cols, ship))
-
-    # Remove the set of points that would cause the ship to overlap the board
-    # boundaries.
-    points_remaining -= _points_of_boundary_conflict(rows, cols, ship, orientation)
-
-    # Remove the set of points that would cause the ship to overlap other ships
-    # that have already been placed.
-    conflict_sets = (
-        _points_of_ship_conflict(p, ship, orientation) for p in points_unavailable
-    )
-    for conflict_set in conflict_sets:
-        points_remaining -= conflict_set
-
-    # Pick a random point from the set of remaining points.
-    point = random.choice(tuple(points_remaining))
-
-    # Rooted at the chosen point, find and return all points corresponding to
-    # the ship & orientation.
-    return _ship_points(point, ship, orientation)
-
-
-def _enumerate_all_points(rows: int, cols: int) -> Iterable:
-    for row in range(rows):
-        for col in range(cols):
-            yield (row, col)
-
-
 def generate_ship_placements(
-    rows: int, cols: int, ships: Tuple[int, ...]
+    # rows: int, cols: int, ships: Tuple[int, ...]
+    game_config: GameConfig,
 ) -> Tuple[Ship, ...]:
     """
     Generates a set of points for each ship.
     """
-    points_available = set(_enumerate_all_points(rows, cols))
+    points_available = set(enumerate_all_points(game_config.rows, game_config.cols))
     points_unavailable = set()
     placements = []
 
@@ -282,10 +237,20 @@ def generate_ship_placements(
       fit on the board, back up and re-place the last ship in a different
       position.
     """
+    largest_ship_first = (
+        (ship_id, game_config.ships[ship_id])
+        for ship_id in sorted(
+            game_config.ships, key=lambda k: game_config.ships[k], reverse=True
+        )
+    )
 
-    for ship_id, ship in zip(iter_all_strings(), sorted(ships, reverse=True)):
+    for ship_id, ship_length in largest_ship_first:
         ship_points = select_ship_placement(
-            rows, cols, ship, points_available, points_unavailable
+            game_config.rows,
+            game_config.cols,
+            ship_length,
+            points_available,
+            points_unavailable,
         )
         placements.append(Ship(ship_id, ship_points))  # , len(ship_points)))
         points_available -= ship_points
@@ -294,7 +259,39 @@ def generate_ship_placements(
     return tuple(placements)
 
 
-def iter_all_strings():
-    for size in itertools.count(1):
-        for s in itertools.product(ascii_lowercase, repeat=size):
-            yield "".join(s)
+def select_ship_placement(
+    rows: int,
+    cols: int,
+    ship_length: int,
+    points_available: Set[Point],
+    points_unavailable: Set[Point],
+) -> Set[Point]:
+    """
+    Choose a set of valid points for a given ship.
+    """
+    points_remaining = set(points_available)
+
+    # Pick a random orientation.
+    orientation = random.choice(_available_orientations(rows, cols, ship_length))
+
+    # Remove the set of points that would cause the ship to overlap the board
+    # boundaries.
+    points_remaining -= _points_of_boundary_conflict(
+        rows, cols, ship_length, orientation
+    )
+
+    # Remove the set of points that would cause the ship to overlap other ships
+    # that have already been placed.
+    conflict_sets = (
+        _points_of_ship_conflict(p, ship_length, orientation)
+        for p in points_unavailable
+    )
+    for conflict_set in conflict_sets:
+        points_remaining -= conflict_set
+
+    # Pick a random point from the set of remaining points.
+    point = random.choice(tuple(points_remaining))
+
+    # Rooted at the chosen point, find and return all points corresponding to
+    # the ship & orientation.
+    return _ship_points(point, ship_length, orientation)

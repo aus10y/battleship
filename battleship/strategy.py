@@ -1,31 +1,48 @@
-from abc import ABC, abstractmethod
-import itertools
 import random
-
-from pprint import pprint, pformat
+from abc import ABC, abstractmethod
 from queue import Queue
-from timeit import default_timer as timer
-from typing import Callable, Dict, Generator, Iterable, Set, Tuple, List, Type, Union
+from typing import Generator, Iterable, List, Set, Tuple
 
-from .board import (
-    Board,
-    Ship,
-    Orientation,
-    Point,
-    format_board,
-    generate_ship_placements,
-    _enumerate_all_points,
-    initialize_board,
-    format_board,
-    set_board,
-    BOARD_DIMENSIONS,
-    SHIPS,
-)
+from .board import Board, Orientation, Point, format_board, initialize_board
+from .enemy import Enemy
+from .game import GameConfig
+from .tools import enumerate_all_points
 
 
 DEBUG = False
 
+
 # -----------------------------------------------------------------------------
+
+
+class BattleShipStrategy(ABC):
+    @abstractmethod
+    def __init__(self, game_config: GameConfig, enemy: Enemy):
+        self.game = game_config
+        self.enemy = enemy
+
+    @abstractmethod
+    def step(self) -> Point:
+        pass
+
+    @abstractmethod
+    def solve(self):
+        pass
+
+    @abstractmethod
+    def is_solved(self) -> bool:
+        pass
+
+    @abstractmethod
+    def solution(self):
+        pass
+
+
+# -----------------------------------------------------------------------------
+
+
+class ProbabilityStrategy(BattleShipStrategy):
+    pass
 
 
 def _points_until_blocked(board: Board, points: Iterable[Point]) -> int:
@@ -101,16 +118,12 @@ def _subtract_possible_placements(
     placements_board[row][col] = 0
 
 
+def _initial_ship_odds(game: GameConfig) -> Board:
+    board = Board(game.rows, game.cols)
 
-
-def _initial_ship_odds(dimensions: Tuple[int, int], ships: Tuple[int, ...]) -> Board:
-    rows, cols = dimensions
-
-    board = Board(rows, cols)
-
-    for row in range(rows):
-        for col in range(cols):
-            for ship in ships:
+    for row in range(game.rows):
+        for col in range(game.cols):
+            for ship in game.ships.values():
                 point = (row, col)
                 board[row][col] += _possible_placements(board, point, ship)
 
@@ -118,115 +131,7 @@ def _initial_ship_odds(dimensions: Tuple[int, int], ships: Tuple[int, ...]) -> B
 
 
 # -----------------------------------------------------------------------------
-
-
-class Game:
-    def __init__(self, rows, cols, ships):
-        self.rows = rows
-        self.cols = cols
-        self.ships = ships
-
-
-class BattleShipStrategy(ABC):
-    @abstractmethod
-    def __init__(self, dimensions: Tuple[int, int], ships: Tuple[Ship, ...]):
-        self.dimensions = dimensions
-        self._rows, self._cols = dimensions
-        self.ships = ships
-
-    @abstractmethod
-    def step(self) -> Point:
-        pass
-
-    @abstractmethod
-    def solve(self):
-        pass
-
-    @abstractmethod
-    def is_solved(self) -> bool:
-        pass
-
-    @abstractmethod
-    def solution(self):
-        pass
-
-
-# -----------------------------------------------------------------------------
 # Logic for sampling the board / sinking ships
-
-
-def _apply_missile(
-    point: Point, ships: Tuple[Ship, ...]
-) -> Tuple[bool, bool, Union[str, None]]:
-    is_hit = False
-    is_sunk = False
-    ship_id = None
-
-    for ship in ships:
-        # if point not in placement.points:
-        #    continue
-        if ship.is_hit(point):
-            return (True, ship.is_sunk(), ship.id)
-
-    return (is_hit, is_sunk, ship_id)
-
-
-def _ships_remain(ships: Tuple[Ship, ...]) -> bool:
-    # return any(p.points for p in ship_placements)
-    return any(not ship.is_sunk() for ship in ships)
-
-
-def simulate_game(
-    dimensions: Tuple[int, int],
-    ship_sizes: Tuple[int, ...],
-    StrategyClass: Type[BattleShipStrategy],
-):
-    rows, cols = dimensions
-
-    ships = generate_ship_placements(rows, cols, ship_sizes)
-    pprint(ships)
-    # board = initialize_board(dimensions)
-    # set_board(board, ship_placements)
-
-    strategy = StrategyClass(dimensions, ships)
-    turns = strategy.solve()
-    return (strategy.is_solved(), turns)
-
-
-def run_simulation(
-    dimensions: Tuple[int, int],
-    ships: Tuple[Ship, ...],
-    search_strategy: Callable,
-    hit_strategy: Callable,
-) -> Tuple[bool, List[Point], Set[Point]]:
-    rows, cols = dimensions
-
-    turns = []
-    points_remaining = set(_enumerate_all_points(rows, cols))
-
-    _ship_lengths = tuple(s.length for s in ships)
-    points_to_search = search_strategy(rows, cols, _ship_lengths)
-
-    # Loop while any ships remain
-    while _ships_remain(ships):
-        # Pick a point to test
-        try:
-            point = next(points_to_search)
-        except StopIteration:
-            break
-
-        if point not in points_remaining:
-            if DEBUG:
-                print(f"- Point '{point}' already tested")
-            continue
-
-        # Apply hit strategy
-        additional_points = hit_strategy(dimensions, point, points_remaining, ships)
-
-        turns.extend(additional_points)
-        points_remaining -= set(additional_points)
-
-    return (not _ships_remain(ships), turns, points_remaining)
 
 
 def _get_border_points(point: Point) -> Tuple[Tuple[Orientation, Point], ...]:
@@ -265,11 +170,12 @@ def hit_strategy_full_context(
     dimensions: Tuple[int, int],
     point: Point,
     points_available: Set[Point],
-    ships: Tuple[Ship, ...],
+    enemy: Enemy,
 ):
-    ship_map = {ship.id: ship for ship in ships}
+    ship_map = {ship.id: ship for ship in enemy._ships}
 
-    is_hit, is_sunk, ship_id = _apply_missile(point, ships)
+    # is_hit, is_sunk, ship_id = _apply_missile(point, ships)
+    is_hit, is_sunk, ship_id = enemy.apply_missile(point)
     points_tested = [point]
     points_available.remove(point)
 
@@ -314,7 +220,8 @@ def hit_strategy_full_context(
         for _, border_point in border_points:
 
             # Test the point.
-            is_hit, is_sunk, border_ship_id = _apply_missile(border_point, ships)
+            # is_hit, is_sunk, border_ship_id = _apply_missile(border_point, ships)
+            is_hit, is_sunk, border_ship_id = enemy.apply_missile(border_point)
 
             points_tested.append(border_point)
             points_available.remove(border_point)
@@ -363,7 +270,8 @@ def hit_strategy_full_context(
                 if DEBUG:
                     print(f">> Points ahead ('{border_point}'): {points_ahead}")
                 for p in points_ahead:
-                    is_hit, is_sunk, ship_id_next = _apply_missile(p, ships)
+                    # is_hit, is_sunk, ship_id_next = _apply_missile(p, ships)
+                    is_hit, is_sunk, ship_id_next = enemy.apply_missile(p)
                     points_tested.append(p)
                     points_available.remove(p)
 
@@ -409,7 +317,8 @@ def hit_strategy_full_context(
                     if DEBUG:
                         print(f">> Points behind ('{border_point}'): {points_behind}")
                     for p in points_behind:
-                        is_hit, is_sunk, ship_id_next = _apply_missile(p, ships)
+                        # is_hit, is_sunk, ship_id_next = _apply_missile(p, ships)
+                        is_hit, is_sunk, ship_id_next = enemy.apply_missile(p)
                         points_tested.append(p)
                         points_available.remove(p)
 
@@ -444,7 +353,7 @@ def random_search(rows: int, cols: int, ships: Tuple[int, ...]) -> Generator:
     """
     True random search.
     """
-    points = set(_enumerate_all_points(rows, cols))
+    points = set(enumerate_all_points(rows, cols))
     yield from points
 
 
@@ -475,7 +384,7 @@ def random_checkerboard_priority_search(
 ) -> Generator:
 
     # All points
-    points_remaining = set(_enumerate_all_points(rows, cols))
+    points_remaining = set(enumerate_all_points(rows, cols))
     points_tested = set()
 
     # Produce set of points for largest ship
@@ -522,15 +431,17 @@ def random_checkerboard_quadrant_search(
 
 
 class CheckerboardSparseFirst(BattleShipStrategy):
-    def __init__(self, dimensions: Tuple[int, int], ships: Tuple[Ship, ...]):
-        super().__init__(dimensions, ships)
+    def __init__(self, game_config: GameConfig, enemy: Enemy):
+        super().__init__(game_config, enemy)
 
         self._is_solved = False
         self._finished = False
         self._turns = []
         self._search_strategy = random_checkerboard_search
         self._hit_strategy = hit_strategy_full_context
-        self._points_remaining = set(_enumerate_all_points(self._rows, self._cols))
+        self._points_remaining = set(
+            enumerate_all_points(self.game.rows, self.game.cols)
+        )
 
     def step(self) -> Point:
         return (0, 0)
@@ -539,11 +450,13 @@ class CheckerboardSparseFirst(BattleShipStrategy):
         if self._finished:
             return (self._is_solved, self._turns, self._points_remaining)
 
-        _ship_lengths = tuple(s.length for s in self.ships)
-        points_to_search = self._search_strategy(self._rows, self._cols, _ship_lengths)
+        _ship_lengths = tuple(length for length in self.game.ships.values())
+        points_to_search = self._search_strategy(
+            self.game.rows, self.game.cols, _ship_lengths
+        )
 
         # Loop while any ships remain
-        while _ships_remain(self.ships):
+        while not self.enemy.all_sunk():
             # Pick a point to test
             try:
                 point = next(points_to_search)
@@ -557,14 +470,14 @@ class CheckerboardSparseFirst(BattleShipStrategy):
 
             # Apply hit strategy
             additional_points = self._hit_strategy(
-                self.dimensions, point, self._points_remaining, self.ships
+                self.game.dimensions, point, self._points_remaining, self.enemy
             )
 
             self._turns.extend(additional_points)
             self._points_remaining -= set(additional_points)
 
         self._finished = True
-        self._is_solved = not _ships_remain(self.ships)
+        self._is_solved = self.enemy.all_sunk()
 
         return (self._is_solved, self._turns, self._points_remaining)
 
@@ -587,122 +500,3 @@ def evaluate_search(rows: int, cols: int, ships: Tuple[int, ...], search_strateg
         board[row][col] = "O"
         print(format_board(board))
         print("\n--------------------\n")
-
-
-def play_one_game(rows, cols, ships):
-    ship_placements = generate_ship_placements(rows, cols, ships)
-    board = initialize_board((rows, cols))
-    set_board(board, ship_placements)
-    print(format_board(board))
-    print()
-
-    result = run_simulation(
-        (rows, cols),
-        ship_placements,
-        random_checkerboard_search,
-        hit_strategy_full_context,
-    )
-
-    print("--------------------")
-    print(f"Sunk: {result[0]}")
-    print(f"Turns: {len(result[1])}")
-    print("--------------------")
-
-    return (result, ship_placements)
-
-
-def print_histogram(bins):
-    for turns in sorted(bins):
-        print(f"{turns},{bins[turns]}")
-
-
-def analyze_results(bins: Dict[int, int], histogram=True):
-    turns_taken = sum(turns * count for turns, count in bins.items())
-    games_played = sum(count for _, count in bins.items())
-
-    # Min & Max
-    min_turn, max_turn = min(bins), max(bins)
-
-    # Mean
-    mean_turns = turns_taken / games_played
-
-    # Median
-    def _flatten_bins(binned_turns):
-        for turns, counts in (
-            (turns, binned_turns[turns]) for turns in sorted(binned_turns)
-        ):
-            for _ in range(counts):
-                yield turns
-
-    _start = games_played // 2
-    _stop = (_start + 2) if games_played % 2 == 0 else (_start + 1)
-    _midpoint = list(itertools.islice(_flatten_bins(bins), _start, _stop))
-
-    median_turns = sum(_midpoint) / len(_midpoint)
-
-    # -----
-
-    print(f"- min turns: {min_turn}")
-    print(f"- max turns: {max_turn}")
-    print(f"- mean turns:   {mean_turns}")
-    print(f"- median turns: {median_turns}")
-    if histogram:
-        print(f"- Histogram:")
-        print_histogram(bins)
-
-
-def run_simulations(rows, cols, ships, search_strategy, hit_strategy, runs=1000):
-    bins = dict()
-
-    start_time = timer()
-    for _ in range(runs):
-        ship_placements = generate_ship_placements(rows, cols, ships)
-        board = initialize_board((rows, cols))
-        set_board(board, ship_placements)
-
-        sank_all, turns, remaining = run_simulation(
-            (rows, cols),
-            ship_placements,
-            search_strategy,
-            hit_strategy,
-        )
-
-        if not sank_all:
-            print("!!")
-            print(format_board(board))
-
-        turn_count = len(turns)
-        if turn_count not in bins:
-            bins[turn_count] = 0
-        bins[turn_count] += 1
-
-    end_time = timer()
-
-    print(f"Summary:")
-    print(f"- Time: {end_time - start_time:0.2f}s")
-    analyze_results(bins)
-
-    return bins
-
-
-if __name__ == "__main__":
-    ROWS, COLS = BOARD_DIMENSIONS
-
-    start = timer()
-    ship_placements = generate_ship_placements(ROWS, COLS, SHIPS)
-    stop = timer()
-
-    board = initialize_board(BOARD_DIMENSIONS)
-    set_board(board, ship_placements)
-
-    print(f"\nShip Placements ({stop - start:0.6f}s): \n{pformat(ship_placements)}\n")
-    print(f"\nBoard: \n{format_board(board)}\n")
-
-    # -----
-
-    boards = [initialize_board(BOARD_DIMENSIONS) for _ in range(100)]
-    for board in boards:
-        ship_placements = generate_ship_placements(ROWS, COLS, SHIPS)
-        # set_board(board, ship_placements, _determine_ship_identity)
-
-    # write_games("battleship_boards.txt", SHIPS, boards)
