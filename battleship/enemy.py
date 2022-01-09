@@ -1,4 +1,4 @@
-from typing import Iterable, Set, Tuple, Union
+from typing import Iterable, List, Set, Tuple, Union
 
 from .board import Point, Ship
 
@@ -44,3 +44,6 @@ class Enemy:
 
     def all_sunk(self) -> bool:
         return all(ship.is_sunk() for ship in self._ships)
+
+    def ships_hit(self) -> List[str]:
+        return [s.id for s in self._ships if s._hits]

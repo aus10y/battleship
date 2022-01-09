@@ -1,15 +1,14 @@
 import random
 from enum import Enum
-from typing import Iterable, Iterator, List, Set, Tuple
+from typing import Any, Iterable, Iterator, List, Set, Tuple
 
-from battleship.game import GameConfig
-from battleship.tools import enumerate_all_points
+from .game import GameConfig, Point
+from .tools import enumerate_all_points
 
 """
 Convenient Type Aliases
 """
 SimpleBoard = List[List[str]]
-Point = Tuple[int, int]
 
 
 """
@@ -60,16 +59,52 @@ class Board:
     def __getitem__(self, row):
         return self._board[row]
 
-    def __repr__(self):
-        return "\n".join("".join(f"{col:>3}" for col in row) for row in self._board)
+    @staticmethod
+    def _row_fmt_helper(row_num, row) -> Iterable[str]:
+        yield str(row_num)
+        for value in row:
+            yield str(value)
 
-    def _points(self) -> Iterator:
+    def __repr__(self):
+        # return "\n".join("".join(f"{col:>3}" for col in row) for row in self._board)
+        row_width = len(str(self.rows))
+        col_width = len(str(self.cols))
+
+        header = "{}{}".format(
+            " " * (row_width + 1),
+            " ".join(
+                f"{str(col_num).rjust(col_width)}" for col_num in range(self.cols)
+            ),
+        )
+
+        body = "\n".join(
+            " ".join(s.rjust(col_width) for s in self._row_fmt_helper(row_num, row))
+            for row_num, row in enumerate(self._board)
+        )
+
+        return f"{header}\n{body}"
+
+    def _points(self) -> Iterator[Point]:
         for row in range(self.rows):
             for col in range(self.cols):
                 yield (row, col)
 
-    def points(self) -> Iterator:
+    def get(self, point: Point) -> Any:
+        row, col = point
+        return self[row][col]
+
+    def set(self, point: Point, value: Any):
+        row, col = point
+        self[row][col] = value
+
+    def points(self) -> Iterator[Point]:
         return self._points()
+
+    def values(self) -> Iterator:
+        return (self._board[row][col] for row, col in self._points())
+
+    def items(self) -> Iterator:
+        return (((row, col), self._board[row][col]) for row, col in self._points())
 
 
 def get_board_dimensions(board: SimpleBoard):

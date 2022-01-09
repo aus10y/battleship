@@ -34,6 +34,25 @@ def simulate_game(
     strategy = StrategyClass(game, enemy)
     return strategy.solve()
 
+def simulate_games(
+    dimensions: Tuple[int, int],
+    ship_sizes: Tuple[int, ...],
+    StrategyClass: Type[BattleShipStrategy],
+    games: int = 1000
+):
+    turns = 0
+    solved = 0
+    game = GameConfig(dimensions, ship_sizes)
+    for _ in range(games):
+        ships = generate_ship_placements(game)
+        enemy = Enemy(game.dimensions, ships)
+        strategy = StrategyClass(game, enemy)
+        strategy.solve()
+        if strategy.is_solved():
+            solved += 1
+        turns += len(strategy._ps._points_tested)
+    return solved, turns / games
+
 
 def play_one_game(rows, cols, ships):
     game = GameConfig((rows, cols), ships)

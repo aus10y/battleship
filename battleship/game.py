@@ -1,6 +1,9 @@
 import itertools
 from string import ascii_lowercase
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Iterator, Tuple
+
+
+Point = Tuple[int, int]
 
 
 def _iter_all_strings():
@@ -14,6 +17,7 @@ class GameConfig:
         self.dimensions = dimensions
         self.rows, self.cols = dimensions
         self.ships = self._identify_ships(ship_lengths)
+        self.points = list(self._points(self.rows, self.cols))
 
     @classmethod
     def _identify_ships(cls, ship_lengths: Iterable[int]) -> Dict[str, int]:
@@ -28,3 +32,9 @@ class GameConfig:
 
     def __repr__(self):
         return f"<Game(dimensions=({self.rows}, {self.cols}), ships={self.ships})>"
+
+    @staticmethod
+    def _points(rows, cols) -> Iterator[Point]:
+        for row in range(rows):
+            for col in range(cols):
+                yield (row, col)
