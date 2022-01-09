@@ -13,7 +13,7 @@ from .strategy import (
     BattleShipStrategy,
     CheckerboardSparseFirst,
     hit_strategy_full_context,
-    play_one_game,
     random_checkerboard_search,
-    run_simulation,
+    ProbabilitySearch,
+    ProbabilityStrategy
 )
