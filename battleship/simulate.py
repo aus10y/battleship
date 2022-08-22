@@ -1,4 +1,6 @@
+from curses.panel import top_panel
 import itertools
+from tabnanny import verbose
 from timeit import default_timer as timer
 from typing import Callable, Dict, List, Set, Tuple, Type
 
@@ -14,6 +16,7 @@ from .enemy import Enemy
 from .game import GameConfig
 from .strategy import (
     BattleShipStrategy,
+    ProbabilitySearch,
     hit_strategy_full_context,
     random_checkerboard_search,
 )
@@ -21,6 +24,41 @@ from .tools import enumerate_all_points
 
 
 DEBUG = False
+
+
+def interactive_game(
+    dimensions: Tuple[int, int],
+    ship_sizes: Tuple[int, ...],
+    verbose=False
+):
+    game = GameConfig(dimensions, ship_sizes)
+    strategy = ProbabilitySearch(game)
+
+    ship_names = ", ".join(game.ships)
+
+    while strategy.points_remain():
+        point = strategy.get_point()
+        answer = input(f"- {point}, hit? ").lower()
+        if answer in {'y', 'yes'}:
+            while True:
+                ship = input(f"-- ship hit? (choices: {ship_names}) ").lower()
+                if ship in game.ships:
+                    break
+            strategy.hit(point, ship, verbose=True)
+        elif answer in {'n', 'no'}:
+            strategy.miss(point, verbose=True)
+        else:
+            continue
+
+        if verbose:
+            top_points = '\n'.join(str(p) for p in strategy._ranked_points[:5])
+            print("----------")
+            print(f"Ships Hit: {', '.join(s for (s, points) in strategy._ship_hits.items() if points)}")
+            print(strategy.probability_board, end="\n\n")
+            print(top_points)
+            print("----------")
+
+    print('Done!')
 
 
 def simulate_game(
@@ -34,15 +72,25 @@ def simulate_game(
     strategy = StrategyClass(game, enemy)
     return strategy.solve()
 
+
 def simulate_games(
     dimensions: Tuple[int, int],
     ship_sizes: Tuple[int, ...],
     StrategyClass: Type[BattleShipStrategy],
-    games: int = 1000
+    games: int = 1000,
 ):
-    turns = 0
+    turns_total = 0
     solved = 0
+    bins = {i: 0 for i in range(1, 101)}
     game = GameConfig(dimensions, ship_sizes)
+    start_time = timer()
+    turns_all = []
+
+    best_threshold = 100
+    worst_threshold = 0
+    best_arangements = []
+    worst_arangements = []
+
     for _ in range(games):
         ships = generate_ship_placements(game)
         enemy = Enemy(game.dimensions, ships)
@@ -50,8 +98,45 @@ def simulate_games(
         strategy.solve()
         if strategy.is_solved():
             solved += 1
-        turns += len(strategy._ps._points_tested)
-    return solved, turns / games
+            turns = strategy.turns()
+            if turns not in bins:
+                bins[turns] = 0
+            bins[turns] += 1
+            turns_all.append(turns)
+            turns_total += turns
+
+            if worst_threshold <= turns:
+                worst_threshold = turns
+                worst_arangements.append((turns, ships))
+                worst_arangements.sort(key=lambda v: v[0])
+                if 10 < len(worst_arangements):
+                    worst_arangements.pop(0)
+            
+
+            if turns <= best_threshold:
+                best_threshold = turns
+                best_arangements.append((turns, ships))
+                best_arangements.sort(key=lambda v: v[0], reverse=True)
+                if 10 < len(best_arangements):
+                    best_arangements.pop(0)
+
+    end_time = timer()
+
+    turns_all.sort()
+    if solved % 2 == 0:
+        median_turns = (turns_all[solved // 2] + turns_all[(solved // 2) - 1]) / 2
+    else:
+        median_turns = turns_all[(solved - 1) // 2]
+
+    return (
+        (end_time - start_time),
+        solved,
+        turns_total / games,
+        median_turns,
+        [(t, bins[t]) for t in sorted(bins)],
+        best_arangements,
+        worst_arangements
+    )
 
 
 def play_one_game(rows, cols, ships):

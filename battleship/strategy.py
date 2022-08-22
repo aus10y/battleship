@@ -1,5 +1,5 @@
 from enum import Enum
-from itertools import groupby
+from itertools import groupby, permutations
 import random
 from abc import ABC, abstractmethod
 from queue import Queue
@@ -39,6 +39,10 @@ class BattleShipStrategy(ABC):
     def solution(self):
         pass
 
+    @abstractmethod
+    def turns(self) -> int:
+        pass
+
 
 # -----------------------------------------------------------------------------
 
@@ -47,6 +51,24 @@ class PointStatus(Enum):
     Unknown = None
     Miss = 1
     Hit = 2
+
+
+class PointEstimate:
+    __slots__ = ("permutations", "probability")
+
+    def __init__(self, permutations: int, probability: float):
+        self.permutations: int = permutations
+        self.probability: float = probability
+
+    def __str__(self):
+        return repr(self)
+
+    def __repr__(self):
+        return f"PointEstimate({self.permutations}, {self.probability:0.3f})"
+
+    def set(self, permutations: int, probability: float):
+        self.permutations = permutations
+        self.probability = probability
 
 
 """
@@ -74,25 +96,17 @@ class ProbabilitySearch:
 
     def __init__(self, game: GameConfig):
         self.game = game
-        self._point_placement_map: Dict[
-            str, Dict[Point, int]
-        ] = self._initial_candidates(game)
-        self._point_probability_map: Dict[str, Dict[Point, float]] = {
-            ship: dict(
-                self._placement_probabilities(
-                    ship_length, self._point_placement_map[ship]
-                )
-            )
-            for ship, ship_length in self.game.ships.items()
-        }
-        self._probability_board = self._initial_odds(
-            self.game, self._point_probability_map
-        )
-        self._hits: Set[Point] = set()
+        self._point_map: Dict[str, Dict[Point, int]] = self._initial_candidates(game)
+
         self._ship_hits: Dict[str, Set[Point]] = {
             ship_id: set() for ship_id in self.game.ships
         }
+
+        self._points_deduced: Set[Point] = set()
+
+        self._hits: Set[Point] = set()
         self._misses: Set[Point] = set()
+
         self._ranked_points = []
         self._update_point_ranking()
 
@@ -100,264 +114,198 @@ class ProbabilitySearch:
     def _points_tested(self):
         return self._hits | self._misses
 
+    @property
+    def probability_board(self) -> Board:
+        board = Board(self.game.rows, self.game.cols, initial_point=0.0)
+        point_cache = {p: prob for p, _, prob in self._ranked_points}
+        for point in board.points():
+            probability = point_cache.get(point, 0.0)
+            if probability:
+                board.set(point, f"{probability:0.3f}")
+            else:
+                board.set(point, "     ")
+        return board
+
+    @property
+    def permutation_board(self) -> Board:
+        board = Board(self.game.rows, self.game.cols, initial_point=0)
+        for point in board.points():
+            permutations = 0
+            for ship in self.game.ships:
+                if point in self._point_map[ship]:
+                    permutations += self._point_map[ship][point]
+            board.set(point, permutations)
+        return board
+
     def hit(self, point_hit: Point, ship_hit: str, verbose=False):
-        row, col = point_hit
         self._hits.add(point_hit)
         self._ship_hits[ship_hit].add(point_hit)
 
-        # Remove the hit point from the candidacy of all ships.
-        for _ship in self.game.ships:
-            if point_hit in self._point_placement_map[_ship]:
-                self._probability_board[row][col] -= self._point_probability_map[_ship][
-                    point_hit
-                ]
-                del self._point_placement_map[_ship][point_hit]
-                del self._point_probability_map[_ship][point_hit]
+        for ship, ship_length in self.game.ships.items():
+            if ship == ship_hit:
+                self._evaluate_hit(ship, ship_length, point_hit)
+            else:
+                self._evaluate_miss(ship, ship_length, point_hit)
 
-        # Subtract off the contribution made from each candidate point for this ship.
-        # The points are not yet removed from the set of candidates for this ship.
-        for point, score in self._point_probability_map[ship_hit].items():
-            _row, _col = point
-            self._probability_board[_row][_col] -= score
-
-        # -------------------
-        # General Logic
-        #
-        # For each ship, find the points local to the point hit.
-        #
-        # For the ship hit, intersect the local points with the existing
-        # candidates and clear the existing candidates.
-        #
-        # For each ship, calculate the placements for each local point and
-        # store the points back to the respective candidate dictionaries if the
-        # value is not zero.
-        # -------------------
-
-        # For each ship, find the points local to the point hit.
-
-        def _calc_local_points(ship: str) -> Set[Point]:
-            return set(
-                point
-                for point in self._points_available_all(
-                    point_hit,
-                    self.game.dimensions,
-                    self.game.ships[ship],
-                    set(self._point_placement_map[ship].keys()) | self._ship_hits[ship],
-                )
-                if point not in self._ship_hits[ship]
-            )
-
-        local_points_by_ship = {
-            s: _calc_local_points(s) for s in self.game.ships if s != ship_hit
-        }
-
-        # For the ship hit, intersect the local points with the existing
-        # candidates and clear the existing candidates.
-
-        _local_points = _calc_local_points(ship_hit) & set(
-            self._point_placement_map[ship_hit].keys()
-        )
-        _candidate_points: Dict[Point, int] = {}
-        self._point_placement_map[ship_hit].clear()
-        self._point_probability_map[ship_hit].clear()
-        for point in _local_points:
-            _row, _col = point
-
-            # When calculating the placements, the candidates should include
-            # points already hit for the current (loop) ship.
-            placements = self._possible_placements_2(
-                self.game,
-                point,
-                ship_hit,
-                set(_local_points) | self._ship_hits[ship_hit],
-            )
-
-            if placements:
-                _candidate_points[point] = placements
-
-        # Calculate odds for remaining points
-        num_points_remaining = self.game.ships[ship_hit] - len(
-            self._ship_hits[ship_hit]
-        )
-        total_placements = sum(_candidate_points.values())
-        if total_placements:
-            scale_factor = (num_points_remaining) / total_placements
-            for point, placements in _candidate_points.items():
-                _row, _col = point
-                odds = scale_factor * placements
-                self._point_placement_map[ship_hit][point] = placements
-                self._point_probability_map[ship_hit][point] = odds
-                self._probability_board[_row][_col] += odds
-
-        # For each remaining ship, calculate the placements for each local point and
-        # store the points back to the respective candidate dictionaries if the
-        # value is not zero.
-
-        for ship, points in (
-            (s, p) for s, p in local_points_by_ship.items() if s != ship_hit
-        ):
-            # Accumulate points that have possible placements
-
-            _candidate_points.clear()
-            for point in points:
-                _row, _col = point
-                self._probability_board[_row][_col] -= self._point_probability_map[
-                    ship
-                ][point]
-
-                # When calculating the placements, the candidates should include
-                # points already hit for the current ship (of the loop).
-                placements = self._possible_placements_2(
-                    self.game,
-                    point,
-                    ship,
-                    set(self._point_placement_map[ship]) | self._ship_hits[ship],
-                )
-
-                if placements:
-                    _candidate_points[point] = placements
-                    self._point_placement_map[ship][point] = placements
-                else:
-                    if point in self._point_placement_map[ship]:
-                        del self._point_placement_map[ship][point]
-                        del self._point_probability_map[ship][point]
-
-        def _scale_factor(s):
-            return (self.game.ships[s] - len(self._ship_hits[s])) / sum(
-                self._point_placement_map[s].values()
-            )
-
-        # scale_factor = (self.game.ships[ship] - len(self._ship_hits[ship])) / sum(
-        #     self._point_placement_map[ship].values()
-        # )
-
-        ship_scales = {
-            ship: _scale_factor(ship) for ship in self.game.ships
-            if self._point_placement_map[ship]
-        }
-
-        for ship in ship_scales:
-            for point, placements in self._point_placement_map[ship].items():
-                #prev_odds = self._point_probability_map[ship][point]
-                _row, _col = point
-                odds = ship_scales[ship] * placements
-                # self._point_placement_map[ship][point] = placements
-                self._point_probability_map[ship][point] = odds
-                #self._probability_board[_row][_col] += odds - prev_odds
-
-        for point in self._probability_board.points():
-            self._probability_board.set(
-                point,
-                sum(
-                    prob[point]
-                    for prob in self._point_probability_map.values()
-                    if point in prob
-                ),
-            )
-
+        self._progate_certainties()
         self._update_point_ranking()
 
-    def miss(self, point: Point, verbose=False):
-        row, col = point
-        self._misses.add(point)
-        self._probability_board[row][col] = 0
+    def miss(self, point_missed: Point, verbose=False):
+        # When a ship is missed, the estimated possible permutations and
+        # probabilities need to be reduced in the are around the point,
+        # for each remaining ship.
 
-        # Need to update odds with the candidates
-        potential_candidates = set()
+        self._misses.add(point_missed)
+
+        # Produce a set of candidate points that may need to be re-scored.
         for ship, ship_length in self.game.ships.items():
-            if point not in self._point_placement_map[ship]:
-                continue
+            self._evaluate_miss(ship, ship_length, point_missed)
 
-            del self._point_placement_map[ship][point]
-            del self._point_probability_map[ship][point]
-
-            for orientation in Orientation:
-                points = list(
-                    # self._points_available(
-                    self._points_in_direction(
-                        point,
-                        orientation,
-                        self.game.dimensions,
-                        ship_length,
-                        # points_tested,
-                    )
-                )
-                potential_candidates.update(points)
-
-        candidates = set()
-        for ship in self.game.ships:
-            if not self._point_placement_map[ship]:
-                continue
-
-            # Subtract off the current probabilities
-            for point, probability in self._point_probability_map[ship].items():
-                _row, _col = point
-                self._probability_board[_row][_col] -= probability
-
-            # Find the candidate points
-            ship_candidates = potential_candidates & set(
-                self._point_placement_map[ship].keys()
-            )
-            candidates.update(ship_candidates)
-            for candidate in ship_candidates:
-                candidate_row, candidate_col = candidate
-                placements = self._possible_placements_2(
-                    self.game,
-                    candidate,
-                    ship,
-                    set(self._point_placement_map[ship]) | self._ship_hits[ship],
-                )
-                if placements:
-                    self._point_placement_map[ship][candidate] = placements
-                else:
-                    del self._point_placement_map[ship][candidate]
-                    del self._point_probability_map[ship][candidate]
-
-            if not self._point_placement_map[ship]:
-                continue
-
-            # Determine the probabilities
-            self._point_probability_map[ship].clear()
-            self._point_probability_map[ship].update(
-                self._placement_probabilities(
-                    (self.game.ships[ship] - len(self._ship_hits[ship])),
-                    self._point_placement_map[ship],
-                )
-            )
-
-            # Set the probabilities
-            for point, probability in self._point_probability_map[ship].items():
-                _row, _col = point
-                self._probability_board[_row][_col] += probability
-
-        # Update the odds board
-        # for candidate in candidates:
-        #     candidate_row, candidate_col = candidate
-        #     self._probability_board[candidate_row][candidate_col] = 0
-
-        #     for ship, candidate_map in self._point_placement_map.items():
-        #         if candidate not in candidate_map:
-        #             continue
-        #         self._probability_board[candidate_row][candidate_col] += candidate_map[
-        #             candidate
-        #         ]
-
+        while True:
+            if not self._progate_certainties():
+                break
         self._update_point_ranking()
 
     def sunk(self, ship_id: str):
         # TODO: Remove all remaining candidates when a ship is sunk.
         pass
 
-    def _update_point_ranking(self):
-        rankings = [
-            (point, score)
-            for (point, score) in self._probability_board.items()
-            if score
-        ]
+    def _evaluate_hit(self, ship: str, ship_length: int, point: Point):
+        candidates = set(
+            point
+            for point in self._points_available_all(
+                point,
+                self.game.dimensions,
+                ship_length,
+                set(self._point_map[ship]) | self._ship_hits[ship],
+            )
+            if point in self._point_map[ship]
+        )
 
-        # Sort according to odds, descending
-        rankings.sort(key=lambda v: v[1], reverse=True)
-        self._ranked_points = rankings
+        self._point_map[ship].clear()
+
+        for candidate in candidates:
+            # When calculating the placements, the candidates should include
+            # points already hit for the current ship.
+            permutations = self._possible_placements_2(
+                self.game,
+                candidate,
+                ship,
+                set(candidates) | self._ship_hits[ship],
+            )
+            if permutations:
+                self._point_map[ship][candidate] = permutations
+
+    def _evaluate_miss(self, ship: str, ship_length: int, point: Point):
+        # If the ship has no permutations, it must (should) already be sunk.
+        if not self._point_map[ship]:
+            return
+
+        # If the point was not a candidate for this ship, we shouldn't need
+        # to re-calculate the permutations & probabilities for it's
+        # neighboring points.
+        if point not in self._point_map[ship]:
+            return
+
+        # Ensures the point missed is no longer a candidate.
+        del self._point_map[ship][point]
+
+        # TODO: I don't believe the set is really needed here; this could likely be a comprehension.
+        candidates = set(
+            point
+            for point in self._points_available_all(
+                point,
+                self.game.dimensions,
+                ship_length,
+                set(self._point_map[ship]) | self._ship_hits[ship],
+            )
+            if point in self._point_map[ship]
+        )
+
+        for candidate in candidates:
+            permutations = self._possible_placements_2(
+                self.game,
+                candidate,
+                ship,
+                set(self._point_map[ship]) | self._ship_hits[ship],
+            )
+            if permutations:
+                self._point_map[ship][candidate] = permutations
+            else:
+                del self._point_map[ship][candidate]
+
+    def _progate_certainties(self) -> bool:
+        # Check for the last point left for each ship, and propagate this info to other ships.
+        # i = 0
+        while True:
+            # i += 1
+            success = False
+            for ship, point_map in self._point_map.items():
+                points_remaining = self.game.ships[ship] - len(self._ship_hits[ship])
+                if not points_remaining:
+                    continue
+
+                total_permutations = sum(point_map.values())
+                point_probabilities = (
+                    (point, (points_remaining * (permutations / total_permutations)))
+                    for point, permutations in point_map.items()
+                )
+
+                for candidate, probability in point_probabilities:
+                    if probability != 1.0:
+                        continue
+
+                    if candidate in self._points_deduced:
+                        continue
+
+                    self._points_deduced.add(candidate)
+
+                    for ship_inner, ship_length in (
+                        (s, l) for s, l in self.game.ships.items() if s != ship
+                    ):
+                        if candidate in self._point_map[ship_inner]:
+                            # print(
+                            #     f"--> {ship} / {ship_inner} - {candidate}, {self._point_map[ship_inner].get(candidate, None)}"
+                            # )
+                            self._evaluate_miss(ship_inner, ship_length, candidate)
+                            success = True
+            if not success:
+                break
+
+            # if 1 < i:
+            #     print("Double plus good")
+        return success
+
+    def _update_point_ranking(self):
+        self._ranked_points.clear()
+
+        points = {}
+        for ship, point_permutations in self._point_map.items():
+            if not point_permutations:
+                continue
+
+            total_permutations = 0
+            for point, permutations in point_permutations.items():
+                if point not in points:
+                    points[point] = [0, 0.0]
+                points[point][0] += permutations
+                total_permutations += permutations
+
+            remaining_points = self.game.ships[ship] - len(self._ship_hits[ship])
+            for point, permutations in point_permutations.items():
+                point_prob = remaining_points * (permutations / total_permutations)
+                points[point][1] = 1 - ((1 - points[point][1]) * (1 - point_prob))
+
+        self._ranked_points.extend(
+            (point, permutations, probability)
+            for point, (permutations, probability) in points.items()
+        )
+
+        # Sort by permutations
+        self._ranked_points.sort(key=lambda v: v[1], reverse=True)
+
+        # Sort by probability
+        self._ranked_points.sort(key=lambda v: v[2], reverse=True)
 
     def points_remain(self) -> bool:
         return 0 < len(self._ranked_points)
@@ -371,10 +319,13 @@ class ProbabilitySearch:
         top_points = (v[0] for v in _top_points)
         return top_points
 
-    def top_points_with_score(self) -> Iterator[Tuple[Point, int]]:
+    def top_points_with_score(self) -> Iterator[Tuple[Point, int, float]]:
         # Group the points according to their score.
         grouped_points = (
-            group for score, group in groupby(self._ranked_points, key=lambda v: v[1])
+            group
+            for permutations, group in groupby(
+                self._ranked_points, key=lambda v: (v[1], v[2])
+            )
         )
         top_points = next(grouped_points)
         return top_points
@@ -389,12 +340,29 @@ class ProbabilitySearch:
                 candidates[ship_id][point] = cls._possible_placements(
                     game, point, ship_id, set()
                 )
-            # total_placements = sum(candidates[ship_id].values())
-            # scale = ship_length / total_placements
-            # candidates[ship_id] = {
-            #     point: (scale * placements)
-            #     for point, placements in candidates[ship_id].items()
-            # }
+
+        return candidates
+
+    @classmethod
+    def _initial_estimates(
+        cls, game: GameConfig
+    ) -> Dict[str, Dict[Point, PointEstimate]]:
+        candidates = {}
+
+        for ship_id in game.ships:
+            candidates[ship_id] = {}
+            for point in game.points:
+                permutations = cls._possible_placements(game, point, ship_id, set())
+                candidates[ship_id][point] = PointEstimate(permutations, 0.0)
+
+        for ship_id, ship_length in game.ships.items():
+            remaining_points = ship_length
+            total_permutations = sum(
+                e.permutations for e in candidates[ship_id].values()
+            )
+            scale_factor = remaining_points / total_permutations
+            for estimate in candidates[ship_id].values():
+                estimate.probability = scale_factor * estimate.permutations
 
         return candidates
 
@@ -474,6 +442,7 @@ class ProbabilitySearch:
     ) -> Iterator[Point]:
         """
         Returns points non-inclusive of the given point.
+        The points returned are found in the `available` set.
         """
         points = cls._points_in_direction(point, direction, dimensions, ship_length)
         for neighbor_point in points:
@@ -489,6 +458,10 @@ class ProbabilitySearch:
         ship_length: int,
         available: Set[Point],
     ) -> Iterator[Point]:
+        """
+        Returns points non-inclusive of the given point, for all Orientations.
+        The points returned are found in the `available` set.
+        """
         for direction in Orientation:
             yield from cls._points_available_2(
                 point, direction, dimensions, ship_length, available
@@ -662,6 +635,7 @@ class ProbabilityStrategy(BattleShipStrategy):
         super().__init__(game_config, enemy)
         self._points_tested = set()
         self._ps = ProbabilitySearch(game_config)
+        self._turns: int = 0
 
     def step(
         self, verbose=False
@@ -685,8 +659,10 @@ class ProbabilityStrategy(BattleShipStrategy):
                 self._ps.miss(point, verbose=verbose)
 
             if verbose:
-                print(f"{self._ps._probability_board}")
+                print(f"{self._ps.probability_board}")
                 print(f"{'-'*40}")
+
+            self._turns += 1
 
             return (point, is_hit, is_sunk, ship_id)
         return None
@@ -700,11 +676,9 @@ class ProbabilityStrategy(BattleShipStrategy):
         #   - If not hit, continue loop.
 
         if verbose:
-            print(f"-----\n{repr(self._ps._probability_board)}\n")
+            print(f"-----\n{repr(self._ps.probability_board)}\n")
 
-        i = 0
         while self._ps.points_remain() and not self.enemy.all_sunk():
-            i += 1
             # top_points = tuple(self._ps.top_points())
             # point = random.choice(top_points)
             point = self._ps.get_point()
@@ -725,17 +699,22 @@ class ProbabilityStrategy(BattleShipStrategy):
                 self._ps.miss(point, verbose=verbose)
 
             if verbose:
-                print(f"{self._ps._probability_board}")
+                print(f"{self._ps.probability_board}")
                 print(f"{'-'*40}")
 
+            self._turns += 1
+
         if verbose:
-            print(f"Finished: {i} steps")
+            print(f"Finished: {self._turns} turns")
 
     def is_solved(self) -> bool:
         return all(s.is_sunk() for s in self.enemy._ships)
 
     def solution(self):
         return super().solution()
+
+    def turns(self) -> int:
+        return self._turns
 
 
 # -----------------------------------------------------------------------------
